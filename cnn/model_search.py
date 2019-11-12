@@ -7,7 +7,8 @@ from    genotypes import PRIMITIVES, Genotype
 
 class MixedLayer(nn.Module):
     """
-    a mixtures output of 8 type of units.
+    a mixtures output of 8 type of units. Each MixedLayer is one op (i.e. edge).
+    The output of MixedLayer is weighted output of all allowed primitives.
 
     we use weights to aggregate these outputs while training.
     and softmax to select the strongest edges while inference.
@@ -65,12 +66,18 @@ class Cell(nn.Module):
 
     def __init__(self, steps, multiplier, cpp, cp, c, reduction, reduction_prev):
         """
+        Each cell k takes input from last two cells k-2, k-1. The cell consists of `steps` so that on each step i,
+        we take output of all previous i steps + 2 cell inputs, apply op on each of these outputs and produce their
+        sum as output of i-th step.
+        Each op output has c channels. The output of the cell is produced by forward() is concatenation of last
+        `multiplier` number of layers. Cell could be a reduction cell or it could be a normal cell. The only
+        diference between two is that reduction cell uses stride=2 for the ops that connects to cell inputs.
 
         :param steps: 4, number of layers inside a cell
-        :param multiplier: 4
-        :param cpp: 48
-        :param cp: 48
-        :param c: 16
+        :param multiplier: 4, number of last nodes to concatenate as output, this will multiply number of channels in node
+        :param cpp: 48, channels from cell k-2
+        :param cp: 48, channels from cell k-1
+        :param c: 16, output channels for each node
         :param reduction: indicates whether to reduce the output maps width
         :param reduction_prev: when previous cell reduced width, s1_d = s0_d//2
         in order to keep same shape between s1 and s0, we adopt prep0 layer to
@@ -110,9 +117,9 @@ class Cell(nn.Module):
     def forward(self, s0, s1, weights):
         """
 
-        :param s0:
-        :param s1:
-        :param weights: [14, 8]
+        :param s0: output of cell k-1
+        :param s1: output of cell k-2
+        :param weights: [14, 8], weights for primitives for each edge
         :return:
         """
         # print('s0:', s0.shape,end='=>')
@@ -149,7 +156,7 @@ class Network(nn.Module):
     def __init__(self, c, num_classes, layers, criterion, steps=4, multiplier=4, stem_multiplier=3):
         """
 
-        :param c: 16
+        :param c: 16, (number of output channels from the first layer) / stem_multiplier
         :param num_classes: 10
         :param layers: number of cells of current network
         :param criterion:
@@ -169,15 +176,21 @@ class Network(nn.Module):
 
         # stem_multiplier is for stem network,
         # and multiplier is for general cell
+        # TODO: why do we need stem_multiplier?
         c_curr = stem_multiplier * c # 3*16
         # stem network, convert 3 channel to c_curr
+        # First layer is 3x3, stride 1 layer and assumes 3 channel input
         self.stem = nn.Sequential( # 3 => 48
+            # batchnorm is added after each layer. Bias is turned off due to this in conv layer.
             nn.Conv2d(3, c_curr, 3, padding=1, bias=False),
             nn.BatchNorm2d(c_curr)
         )
 
         # c_curr means a factor of the output channels of current cell
         # output channels = multiplier * c_curr
+        # c_curr: current cell output channels
+        # cp: previous cell output channels
+        # cpp: previous previous cell output channels
         cpp, cp, c_curr = c_curr, c_curr, c # 48, 48, 16
         self.cells = nn.ModuleList()
         reduction_prev = False
@@ -210,7 +223,7 @@ class Network(nn.Module):
         k = sum(1 for i in range(self.steps) for j in range(2 + i))
         num_ops = len(PRIMITIVES) # 8
 
-        # TODO
+        # create k*num_ops parameters that we will share between all cells
         # this kind of implementation will add alpha into self.parameters()
         # it has num k of alpha parameters, and each alpha shape: [num_ops]
         # it requires grad and can be converted to cpu/gpu automatically
@@ -298,14 +311,15 @@ class Network(nn.Module):
 
     def genotype(self):
         """
+        Returns display description of network from the weights for each ops in cell
 
-        :return:
+        :return: 
         """
         def _parse(weights):
             """
 
             :param weights: [14, 8]
-            :return:
+            :return: string array, each member describes edge in the cell
             """
             gene = []
             n = 2

@@ -158,7 +158,9 @@ class FactorizedReduce(nn.Module):
         assert C_out % 2 == 0
 
         self.relu = nn.ReLU(inplace=False)
+        # this conv layer operates on even pixels to produce half width, half channels
         self.conv_1 = nn.Conv2d(C_in, C_out // 2, 1, stride=2, padding=0, bias=False)
+        # this conv layer operates on odd pixels (because of code in forward()) to produce half width, half channels
         self.conv_2 = nn.Conv2d(C_in, C_out // 2, 1, stride=2, padding=0, bias=False)
         self.bn = nn.BatchNorm2d(C_out, affine=affine)
 
@@ -170,6 +172,7 @@ class FactorizedReduce(nn.Module):
         # conv2: []
         # out: torch.Size([32, 32, 16, 16])
 
+        # concate two half channels to produce same number of channels as before but with output as only half the width
         out = torch.cat([self.conv_1(x), self.conv_2(x[:, :, 1:, 1:])], dim=1)
         out = self.bn(out)
         return out

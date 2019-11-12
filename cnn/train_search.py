@@ -13,7 +13,8 @@ from    model_search import Network
 from    arch import Arch
 
 
-
+# this file will find the architecture but will not fully train the model
+# once architecture is found, use train.py to train the model from scratch
 
 
 parser = argparse.ArgumentParser("cifar")
@@ -60,6 +61,7 @@ device = torch.device('cuda:0')
 
 def main():
     np.random.seed(args.seed)
+    # bechmark mode will cause cuDNN to evaluate algorithms for current machine and adapt to the best
     cudnn.benchmark = True
     cudnn.enabled = True
     torch.manual_seed(args.seed)
