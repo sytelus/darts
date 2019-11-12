@@ -1,92 +1,195 @@
-import torch
-import numpy as np
-import torch.nn as nn
-from torch.autograd import Variable
+import  torch
+import  numpy as np
+from    torch import optim, autograd
 
 
-def _concat(xs):
-  return torch.cat([x.view(-1) for x in xs])
+def concat(xs):
+    """
+    flatten all tensor from [d1,d2,...dn] to [d]
+    and then concat all [d_1] to [d_1+d_2+d_3+...]
+    :param xs:
+    :return:
+    """
+    return torch.cat([x.view(-1) for x in xs])
 
 
-class Architect(object):
 
-  def __init__(self, model, args):
-    self.network_momentum = args.momentum
-    self.network_weight_decay = args.weight_decay
-    self.model = model
-    self.optimizer = torch.optim.Adam(self.model.arch_parameters(),
-        lr=args.arch_learning_rate, betas=(0.5, 0.999), weight_decay=args.arch_weight_decay)
 
-  def _compute_unrolled_model(self, input, target, eta, network_optimizer):
-    loss = self.model._loss(input, target)
-    theta = _concat(self.model.parameters()).data
-    try:
-      moment = _concat(network_optimizer.state[v]['momentum_buffer'] for v in self.model.parameters()).mul_(self.network_momentum)
-    except:
-      moment = torch.zeros_like(theta)
-    dtheta = _concat(torch.autograd.grad(loss, self.model.parameters())).data + self.network_weight_decay*theta
-    unrolled_model = self._construct_model_from_theta(theta.sub(eta, moment+dtheta))
-    return unrolled_model
+class Arch:
 
-  def step(self, input_train, target_train, input_valid, target_valid, eta, network_optimizer, unrolled):
-    self.optimizer.zero_grad()
-    if unrolled:
-        self._backward_step_unrolled(input_train, target_train, input_valid, target_valid, eta, network_optimizer)
-    else:
-        self._backward_step(input_valid, target_valid)
-    self.optimizer.step()
+    def __init__(self, model, args):
+        """
 
-  def _backward_step(self, input_valid, target_valid):
-    loss = self.model._loss(input_valid, target_valid)
-    loss.backward()
+        :param model: network
+        :param args:
+        """
+        self.momentum = args.momentum # momentum for optimizer of theta
+        self.wd = args.wd # weight decay for optimizer of theta
+        self.model = model # main model with respect to theta and alpha
+        # this is the optimizer to optimize alpha parameter
+        self.optimizer = optim.Adam(self.model.arch_parameters(),
+                                          lr=args.arch_lr,
+                                          betas=(0.5, 0.999),
+                                          weight_decay=args.arch_wd)
 
-  def _backward_step_unrolled(self, input_train, target_train, input_valid, target_valid, eta, network_optimizer):
-    unrolled_model = self._compute_unrolled_model(input_train, target_train, eta, network_optimizer)
-    unrolled_loss = unrolled_model._loss(input_valid, target_valid)
+    def comp_unrolled_model(self, x, target, eta, optimizer):
+        """
+        loss on train set and then update w_pi, not-in-place
+        :param x:
+        :param target:
+        :param eta:
+        :param optimizer: optimizer of theta, not optimizer of alpha
+        :return:
+        """
+        # forward to get loss
+        loss = self.model.loss(x, target)
+        # flatten current weights
+        theta = concat(self.model.parameters()).detach()
+        # theta: torch.Size([1930618])
+        # print('theta:', theta.shape)
+        try:
+            # fetch momentum data from theta optimizer
+            moment = concat(optimizer.state[v]['momentum_buffer'] for v in self.model.parameters())
+            moment.mul_(self.momentum)
+        except:
+            moment = torch.zeros_like(theta)
 
-    unrolled_loss.backward()
-    dalpha = [v.grad for v in unrolled_model.arch_parameters()]
-    vector = [v.grad.data for v in unrolled_model.parameters()]
-    implicit_grads = self._hessian_vector_product(vector, input_train, target_train)
+        # flatten all gradients
+        dtheta = concat(autograd.grad(loss, self.model.parameters())).data
+        # indeed, here we implement a simple SGD with momentum and weight decay
+        # theta = theta - eta * (moment + weight decay + dtheta)
+        theta = theta.sub(eta, moment + dtheta + self.wd * theta)
+        # construct a new model
+        unrolled_model = self.construct_model_from_theta(theta)
 
-    for g, ig in zip(dalpha, implicit_grads):
-      g.data.sub_(eta, ig.data)
+        return unrolled_model
 
-    for v, g in zip(self.model.arch_parameters(), dalpha):
-      if v.grad is None:
-        v.grad = Variable(g.data)
-      else:
-        v.grad.data.copy_(g.data)
+    def step(self, x_train, target_train, x_valid, target_valid, eta, optimizer, unrolled):
+        """
+        update alpha parameter by manually computing the gradients
+        :param x_train:
+        :param target_train:
+        :param x_valid:
+        :param target_valid:
+        :param eta:
+        :param optimizer: theta optimizer
+        :param unrolled:
+        :return:
+        """
+        # alpha optimizer
+        self.optimizer.zero_grad()
 
-  def _construct_model_from_theta(self, theta):
-    model_new = self.model.new()
-    model_dict = self.model.state_dict()
+        # compute the gradient and write it into tensor.grad
+        # instead of generated by loss.backward()
+        if unrolled:
+            self.backward_step_unrolled(x_train, target_train, x_valid, target_valid, eta, optimizer)
+        else:
+            # directly optimize alpha on w, instead of w_pi
+            self.backward_step(x_valid, target_valid)
 
-    params, offset = {}, 0
-    for k, v in self.model.named_parameters():
-      v_length = np.prod(v.size())
-      params[k] = theta[offset: offset+v_length].view(v.size())
-      offset += v_length
+        self.optimizer.step()
 
-    assert offset == len(theta)
-    model_dict.update(params)
-    model_new.load_state_dict(model_dict)
-    return model_new.cuda()
+    def backward_step(self, x_valid, target_valid):
+        """
+        simply train on validate set and backward
+        :param x_valid:
+        :param target_valid:
+        :return:
+        """
+        loss = self.model.loss(x_valid, target_valid)
+        # both alpha and theta require grad but only alpha optimizer will
+        # step in current phase.
+        loss.backward()
 
-  def _hessian_vector_product(self, vector, input, target, r=1e-2):
-    R = r / _concat(vector).norm()
-    for p, v in zip(self.model.parameters(), vector):
-      p.data.add_(R, v)
-    loss = self.model._loss(input, target)
-    grads_p = torch.autograd.grad(loss, self.model.arch_parameters())
+    def backward_step_unrolled(self, x_train, target_train, x_valid, target_valid, eta, optimizer):
+        """
+        train on validate set based on update w_pi
+        :param x_train:
+        :param target_train:
+        :param x_valid:
+        :param target_valid:
+        :param eta: 0.01, according to author's comments
+        :param optimizer: theta optimizer
+        :return:
+        """
 
-    for p, v in zip(self.model.parameters(), vector):
-      p.data.sub_(2*R, v)
-    loss = self.model._loss(input, target)
-    grads_n = torch.autograd.grad(loss, self.model.arch_parameters())
+        # theta_pi = theta - lr * grad
+        unrolled_model = self.comp_unrolled_model(x_train, target_train, eta, optimizer)
+        # calculate loss on theta_pi
+        unrolled_loss = unrolled_model.loss(x_valid, target_valid)
 
-    for p, v in zip(self.model.parameters(), vector):
-      p.data.add_(R, v)
+        # this will update theta_pi model, but NOT theta model
+        unrolled_loss.backward()
+        # grad(L(w', a), a), part of Eq. 6
+        dalpha = [v.grad for v in unrolled_model.arch_parameters()]
+        vector = [v.grad.data for v in unrolled_model.parameters()]
+        implicit_grads = self.hessian_vector_product(vector, x_train, target_train)
 
-    return [(x-y).div_(2*R) for x, y in zip(grads_p, grads_n)]
+        for g, ig in zip(dalpha, implicit_grads):
+            # g = g - eta * ig, from Eq. 6
+            g.data.sub_(eta, ig.data)
 
+        # write updated alpha into original model
+        for v, g in zip(self.model.arch_parameters(), dalpha):
+            if v.grad is None:
+                v.grad = g.data
+            else:
+                v.grad.data.copy_(g.data)
+
+    def construct_model_from_theta(self, theta):
+        """
+        construct a new model with initialized weight from theta
+        it use .state_dict() and load_state_dict() instead of
+        .parameters() + fill_()
+        :param theta: flatten weights, need to reshape to original shape
+        :return:
+        """
+        model_new = self.model.new()
+        model_dict = self.model.state_dict()
+
+        params, offset = {}, 0
+        for k, v in self.model.named_parameters():
+            v_length = v.numel()
+            # restore theta[] value to original shape
+            params[k] = theta[offset: offset + v_length].view(v.size())
+            offset += v_length
+
+        assert offset == len(theta)
+        model_dict.update(params)
+        model_new.load_state_dict(model_dict)
+        return model_new.cuda()
+
+    def hessian_vector_product(self, vector, x, target, r=1e-2):
+        """
+        slightly touch vector value to estimate the gradient with respect to alpha
+        refer to Eq. 7 for more details.
+        :param vector: gradient.data of parameters theta
+        :param x:
+        :param target:
+        :param r:
+        :return:
+        """
+        R = r / concat(vector).norm()
+
+        for p, v in zip(self.model.parameters(), vector):
+            # w+ = w + R * v
+            p.data.add_(R, v)
+        loss = self.model.loss(x, target)
+        # gradient with respect to alpha
+        grads_p = autograd.grad(loss, self.model.arch_parameters())
+
+
+        for p, v in zip(self.model.parameters(), vector):
+            # w- = (w+R*v) - 2R*v
+            p.data.sub_(2 * R, v)
+        loss = self.model.loss(x, target)
+        grads_n = autograd.grad(loss, self.model.arch_parameters())
+
+        for p, v in zip(self.model.parameters(), vector):
+            # w = (w+R*v) - 2R*v + R*v
+            p.data.add_(R, v)
+
+        h= [(x - y).div_(2 * R) for x, y in zip(grads_p, grads_n)]
+        # h len: 2 h0 torch.Size([14, 8])
+        # print('h len:', len(h), 'h0', h[0].shape)
+        return h
