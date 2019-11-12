@@ -10,7 +10,7 @@ import  torchvision.datasets as dset
 import  torch.backends.cudnn as cudnn
 
 from    model_search import Network
-from    architect import Arch
+from    arch import Arch
 
 
 
