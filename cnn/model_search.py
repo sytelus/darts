@@ -251,6 +251,8 @@ class Network(nn.Module):
 
     def forward(self, x):
         """
+        Runs x through cells, applies final pooling, send through FCs and returns logits
+
         in: torch.Size([3, 3, 32, 32])
         stem: torch.Size([3, 48, 32, 32])
         cell: 0 torch.Size([3, 64, 32, 32]) False

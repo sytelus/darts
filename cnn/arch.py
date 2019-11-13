@@ -7,9 +7,13 @@ def concat(xs):
     """
     flatten all tensor from [d1,d2,...dn] to [d]
     and then concat all [d_1] to [d_1+d_2+d_3+...]
+
     :param xs:
     :return:
     """
+
+    # t.view(-1) reshapes tensor to 1 row N columns
+    # torch.cat concatenates 1xN1 and 1xN2 tensors to 1x(N1+N2) tensors
     return torch.cat([x.view(-1) for x in xs])
 
 
@@ -20,7 +24,7 @@ class Arch:
     def __init__(self, model, args):
         """
 
-        :param model: network
+        :param model: instance of model_search.Network
         :param args:
         """
         self.momentum = args.momentum # momentum for optimizer of theta
@@ -42,8 +46,11 @@ class Arch:
         :return:
         """
         # forward to get loss
+        # pass training input through cells and FCs, compute loss with label
         loss = self.model.loss(x, target)
+
         # flatten current weights
+        # these are not the arch parameters (weights for the ops), but actual model params
         theta = concat(self.model.parameters()).detach()
         # theta: torch.Size([1930618])
         # print('theta:', theta.shape)
@@ -67,10 +74,10 @@ class Arch:
     def step(self, x_train, target_train, x_valid, target_valid, eta, optimizer, unrolled):
         """
         update alpha parameter by manually computing the gradients
-        :param x_train:
-        :param target_train:
-        :param x_valid:
-        :param target_valid:
+        :param x_train: training input
+        :param target_train: training labels
+        :param x_valid: validation input
+        :param target_valid: validation labels
         :param eta:
         :param optimizer: theta optimizer
         :param unrolled:
@@ -122,8 +129,8 @@ class Arch:
         unrolled_loss.backward()
         # grad(L(w', a), a), part of Eq. 6
         dalpha = [v.grad for v in unrolled_model.arch_parameters()]
-        vector = [v.grad.data for v in unrolled_model.parameters()]
-        implicit_grads = self.hessian_vector_product(vector, x_train, target_train)
+        param_grad = [v.grad.data for v in unrolled_model.parameters()]
+        implicit_grads = self.hessian_vector_product(param_grad, x_train, target_train)
 
         for g, ig in zip(dalpha, implicit_grads):
             # g = g - eta * ig, from Eq. 6
@@ -159,37 +166,43 @@ class Arch:
         model_new.load_state_dict(model_dict)
         return model_new.cuda()
 
-    def hessian_vector_product(self, vector, x, target, r=1e-2):
+    def hessian_vector_product(self, param_grad, x, target, epsilon_unit=1e-2):
         """
-        slightly touch vector value to estimate the gradient with respect to alpha
+        slightly touch param_grad value to estimate the gradient with respect to alpha
         refer to Eq. 7 for more details.
-        :param vector: gradient.data of parameters theta
+        :param param_grad: gradient.data of parameters theta
         :param x:
         :param target:
-        :param r:
+        :param epsilon_unit:
         :return:
         """
-        R = r / concat(vector).norm()
+        epsilon = epsilon_unit / concat(param_grad).norm()
 
-        for p, v in zip(self.model.parameters(), vector):
-            # w+ = w + R * v
-            p.data.add_(R, v)
+        # w+ = w + epsilon * w_grad 
+        for p, v in zip(self.model.parameters(), param_grad):
+            # w+ = w + epsilon * v
+            p.data.add_(epsilon, v)
+        # take gradient of loss wrt new weights
         loss = self.model.loss(x, target)
         # gradient with respect to alpha
+        # take (gradient of gradient of above loss) wrt arch parameters
         grads_p = autograd.grad(loss, self.model.arch_parameters())
 
-
-        for p, v in zip(self.model.parameters(), vector):
-            # w- = (w+R*v) - 2R*v
-            p.data.sub_(2 * R, v)
+        # w- = w  - epsilon * w_grad
+        # w- = w+ - 2*epsilon * w_grad
+        for p, v in zip(self.model.parameters(), param_grad):
+            p.data.sub_(2 * epsilon, v)
+            # take gradient of loss wrt new weights
         loss = self.model.loss(x, target)
+        # gradient with respect to alpha
+        # take (gradient of gradient of above loss) wrt arch parameters        
         grads_n = autograd.grad(loss, self.model.arch_parameters())
 
-        for p, v in zip(self.model.parameters(), vector):
-            # w = (w+R*v) - 2R*v + R*v
-            p.data.add_(R, v)
+        # reset back params to original values
+        for p, v in zip(self.model.parameters(), param_grad):
+            p.data.add_(epsilon, v)
 
-        h= [(x - y).div_(2 * R) for x, y in zip(grads_p, grads_n)]
+        h= [(x - y).div_(2 * epsilon) for x, y in zip(grads_p, grads_n)]
         # h len: 2 h0 torch.Size([14, 8])
         # print('h len:', len(h), 'h0', h[0].shape)
         return h
