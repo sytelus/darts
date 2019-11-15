@@ -138,6 +138,8 @@ def main():
         lr = scheduler.get_lr()[0]
         logging.info('\nEpoch: %d lr: %e', epoch, lr)
 
+        # genotype extracts the highest weighted two primitives per node
+        # this is for information dump only
         genotype = model.genotype()
         logging.info('Genotype: %s', genotype)
 
@@ -176,7 +178,7 @@ def train(train_queue, valid_queue, model, arch, criterion, optimizer, lr):
     for step, (x, target) in enumerate(train_queue):
 
         batchsz = x.size(0)
-        model.train()
+        model.train() # put model into train mode
 
         # [b, 3, 32, 32], [40]
         x, target = x.to(device), target.cuda(non_blocking=True)
@@ -192,7 +194,9 @@ def train(train_queue, valid_queue, model, arch, criterion, optimizer, lr):
         # 2. update weight
         optimizer.zero_grad()
         loss.backward()
+        # apparently gradient clipping is important
         nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+        # as our arch parameters (i.e. alpha) is kept seperate, they don't get updated
         optimizer.step()
 
         prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
@@ -208,6 +212,9 @@ def train(train_queue, valid_queue, model, arch, criterion, optimizer, lr):
 
 def infer(valid_queue, model, criterion):
     """
+    For a given model we just evaluate metrics on validation set.
+    Note that this model is not final, i.e., each node i has i+2 edges 
+    and each edge with 8 primitives and associated wieghts.
 
     :param valid_queue:
     :param model:

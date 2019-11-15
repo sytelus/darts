@@ -48,7 +48,10 @@ fh = logging.FileHandler(os.path.join(args.save, 'log.txt'))
 fh.setFormatter(logging.Formatter(log_format))
 logging.getLogger().addHandler(fh)
 
-
+# https://stats.stackexchange.com/a/436203/15943
+# The idea of auxiliary loss (aka auxiliary towers) comes from GoogLeNet paper. At core intuition can be explained in this way:
+# Let's say you are building a network by stacking up lots of identical modules. As network becomes deeper, you face slowed down training because of vanishing gradient issue (this was before BatchNorm days). To promote learning for each module layer, you can attach some small network to the output of that module. This network typically have a couple of conv layers followed by FCs and then final classification prediction. This auxiliary network's task is to predict same label as final network would predict but using the module's output. We add the loss of this aux network to the final loss of the entire network weighted by some value < 1.
+# Now, if the module is learning slowly then it would generate big loss and cause gradient flow in that module helping gradients further downstream as well. This technique has apparently found to help training for very deep networks. Even when using batch norm, this can help to accelerate training during early cycles when weights are randomly initialized. Many NAS architecture uses this technique for initial evaluation during the search as you have a very limited budget to run epochs when evaluating 1000s of architectures so early acceleration improves performance. As aux networks are removed from the final model, it is not considered "cheating".
 
 def main():
 
@@ -120,6 +123,8 @@ def train(train_queue, model, criterion, optimizer):
         logits, logits_aux = model(x)
         loss = criterion(logits, target)
         if args.auxiliary:
+            # in aux mode, we do 1:0.4 weighted average of loss from
+            # hand coded model
             loss_aux = criterion(logits_aux, target)
             loss += args.auxiliary_weight * loss_aux
         loss.backward()

@@ -251,7 +251,8 @@ class Network(nn.Module):
 
     def forward(self, x):
         """
-        Runs x through cells, applies final pooling, send through FCs and returns logits
+        Runs x through cells, applies final pooling, send through FCs and returns logits.
+        This would tech alpha parameters into account.
 
         in: torch.Size([3, 3, 32, 32])
         stem: torch.Size([3, 48, 32, 32])
@@ -319,6 +320,14 @@ class Network(nn.Module):
         """
         def _parse(weights):
             """
+            We have 4 steps, each step can have edge with previous steps + 2 inputs.
+            So total edges = 2 + 3 + 4 + 5 = 14
+            We will have total 8 primitives for each of the 14 edges within each cell.
+            So weight shape is [14, 8]. These are the alpha parameters and shared across cells.
+            For each of the edges for a node, we want to find out top 2 strongest prmitives
+            and make them as "final" for that node. As we don't consider none edge,
+            this guerentees that each node will exactly end up with 2 edges, one final non-none 
+            primitive attached to each. 
 
             :param weights: [14, 8]
             :return: string array, each member describes edge in the cell
@@ -329,11 +338,17 @@ class Network(nn.Module):
             for i in range(self.steps): # for each node
                 end = start + n
                 W = weights[start:end].copy() # [2, 8], [3, 8], ...
+
+                # so far each edge has 8 primitives attached, we will chose top two so that
+                # we get two best edges on which best primitives resides
                 edges = sorted(range(i + 2), # i+2 is the number of connection for node i
                             key=lambda x: -max(W[x][k] # by descending order
                                                for k in range(len(W[x])) # get strongest ops
                                                if k != PRIMITIVES.index('none'))
                                )[:2] # only has two inputs
+
+                # Each node i now we have 2 edges that still has 8 primitives each and 
+                # we want to select best primitive for each edge
                 for j in edges: # for every input nodes j of current node i
                     k_best = None
                     for k in range(len(W[j])): # get strongest ops for current input j->i
@@ -343,6 +358,8 @@ class Network(nn.Module):
                     gene.append((PRIMITIVES[k_best], j)) # save ops and input node
                 start = end
                 n += 1
+
+            # at this point we should have each node, with exactly two edges and associated best primitive
             return gene
 
         gene_normal = _parse(F.softmax(self.alpha_normal, dim=-1).data.cpu().numpy())

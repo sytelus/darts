@@ -8,6 +8,9 @@ class Cell(nn.Module):
 
     def __init__(self, genotype, C_prev_prev, C_prev, C, reduction, reduction_prev):
         """
+        This class is different then model_search.Cell. Here we recieve genotype and build a cell
+        that has 4 nodes, each with exactly two edges and only one primitive attached to this edge.
+        This cell then would be "compiled" to produce PyTorch module.
 
         :param genotype:
         :param C_prev_prev:
@@ -20,6 +23,7 @@ class Cell(nn.Module):
 
         print(C_prev_prev, C_prev, C)
 
+        # if previous layer was reduction layer 
         if reduction_prev:
             self.preprocess0 = FactorizedReduce(C_prev_prev, C)
         else:
@@ -70,6 +74,8 @@ class Cell(nn.Module):
 
         states = [s0, s1]
         for i in range(self._steps):
+            # for each noce i, find which previous two node we 
+            # connect to and corresponding ops for them
             h1 = states[self._indices[2 * i]]
             h2 = states[self._indices[2 * i + 1]]
             op1 = self._ops[2 * i]
@@ -83,13 +89,17 @@ class Cell(nn.Module):
                 if not isinstance(op2, Identity):
                     h2 = drop_path(h2, drop_prob)
 
+            # aggregation of ops result is arithmatic sum
             s = h1 + h2
             states += [s]
+
+        # concatenate outputs of all node which becomes the result of the cell
+        # this makes it necessory that wxh is same for all outputs
         return torch.cat([states[i] for i in self._concat], dim=1)
 
 
 class AuxiliaryHeadCIFAR(nn.Module):
-
+    # Auxiliary head is just hard coded good known network
     def __init__(self, C, num_classes):
         """assuming input size 8x8"""
         super(AuxiliaryHeadCIFAR, self).__init__()
@@ -179,6 +189,7 @@ class NetworkCIFAR(nn.Module):
         for i, cell in enumerate(self.cells):
             s0, s1 = s1, cell(s0, s1, self.drop_path_prob)
             if i == 2 * self._layers // 3:
+                # if asked, also provide logits of good known hand coded model
                 if self._auxiliary and self.training:
                     logits_aux = self.auxiliary_head(s1)
         out = self.global_pooling(s1)

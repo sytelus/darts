@@ -73,6 +73,10 @@ class CrossEntropyLabelSmooth(nn.Module):
 
 def main():
 
+    # the main difference beween CIFAR10 and ImageNet is that we use 14 cells instead of 8,
+    # different lr and weight decay. The network uses different stem however cell structure
+    # remains same.
+
     if not torch.cuda.is_available():
         logging.info('no gpu device available')
         sys.exit(1)
