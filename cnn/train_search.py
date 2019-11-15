@@ -22,8 +22,8 @@ parser.add_argument('--data', type=str, default='../data', help='location of the
 parser.add_argument('--batchsz', type=int, default=64, help='batch size')
 parser.add_argument('--lr', type=float, default=0.025, help='init learning rate')
 parser.add_argument('--lr_min', type=float, default=0.001, help='min learning rate')
-parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
-parser.add_argument('--wd', type=float, default=3e-4, help='weight decay')
+parser.add_argument('--momentum', type=float, default=0.9, help='momentum for model parameters')
+parser.add_argument('--wd', type=float, default=3e-4, help='weight decay for model parameters')
 parser.add_argument('--report_freq', type=float, default=50, help='report frequency')
 parser.add_argument('--gpu', type=int, default=0, help='gpu device id')
 parser.add_argument('--epochs', type=int, default=50, help='num of training epochs')
@@ -38,8 +38,8 @@ parser.add_argument('--seed', type=int, default=2, help='random seed')
 parser.add_argument('--grad_clip', type=float, default=5, help='gradient clipping range')
 parser.add_argument('--train_portion', type=float, default=0.5, help='portion of training/val splitting')
 parser.add_argument('--unrolled', action='store_true', default=False, help='use one-step unrolled validation loss')
-parser.add_argument('--arch_lr', type=float, default=3e-4, help='learning rate for arch encoding')
-parser.add_argument('--arch_wd', type=float, default=1e-3, help='weight decay for arch encoding')
+parser.add_argument('--arch_lr', type=float, default=3e-4, help='learning rate for arch parameters')
+parser.add_argument('--arch_wd', type=float, default=1e-3, help='weight decay for arch parameters')
 args = parser.parse_args()
 
 args.exp_path += str(args.gpu)
@@ -52,12 +52,10 @@ fh = logging.FileHandler(os.path.join(args.exp_path, 'log.txt'))
 fh.setFormatter(logging.Formatter(log_format))
 logging.getLogger().addHandler(fh)
 
-
-
+# available GPU IDs
 os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
+# select first visible GPU ID
 device = torch.device('cuda:0')
-
-
 
 def main():
     np.random.seed(args.seed)
@@ -92,14 +90,15 @@ def main():
     # print('reuse mem now ...')
     # ================================================
 
-    args.unrolled = True
-
+    if not args.unrolled:
+        print('WARNING: unrolled arg is NOT true. This is useful only for abalation study for bilevel optimization!')
 
     logging.info('GPU device = %d' % args.gpu)
     logging.info("args = %s", args)
 
 
-    criterion = nn.CrossEntropyLoss().to(device)
+    criterion = nn.CrossEntropyLoss().to(device) # CIFAR classification task
+    # 16 inital channels, num_classes=10, 8 cells (layers)
     model = Network(args.init_ch, 10, args.layers, criterion).to(device)
 
     logging.info("Total param size = %f MB", utils.count_parameters_in_MB(model))
@@ -107,6 +106,9 @@ def main():
     # this is the optimizer to optimize
     optimizer = optim.SGD(model.parameters(), args.lr, momentum=args.momentum, weight_decay=args.wd)
 
+    # note that we get only train set here and break it down in 1/2 to get validation set
+    # cifar10 has 60K images in 10 classes, 50k in train, 10k in test
+    # so ultimately we have 25K train, 25K val, 10k test
     train_transform, valid_transform = utils._data_transforms_cifar10(args)
     train_data = dset.CIFAR10(root=args.data, train=True, download=True, transform=train_transform)
 
@@ -114,11 +116,11 @@ def main():
     indices = list(range(num_train))
     split = int(np.floor(args.train_portion * num_train)) # 25000
 
+    # generate random batches of 64 on train/val subsets
     train_queue = torch.utils.data.DataLoader(
         train_data, batch_size=args.batchsz,
         sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[:split]),
         pin_memory=True, num_workers=2)
-
     valid_queue = torch.utils.data.DataLoader(
         train_data, batch_size=args.batchsz,
         sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[split:]),
@@ -127,10 +129,11 @@ def main():
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
                     optimizer, float(args.epochs), eta_min=args.lr_min)
 
+    # arch is sort of meta model that would update theta and alpha parameters
     arch = Arch(model, args)
 
+    # in this phase we only run 50 epochs
     for epoch in range(args.epochs):
-
         scheduler.step()
         lr = scheduler.get_lr()[0]
         logging.info('\nEpoch: %d lr: %e', epoch, lr)

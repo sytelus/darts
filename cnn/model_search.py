@@ -241,7 +241,7 @@ class Network(nn.Module):
     def new(self):
         """
         create a new model and initialize it with current alpha parameters.
-        However, its weights are left untouched.
+        However, its weights are left at initial value.
         :return:
         """
         model_new = Network(self.c, self.num_classes, self.layers, self.criterion).cuda()
